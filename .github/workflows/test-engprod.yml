@@ -1,0 +1,75 @@
+name: Echo endpoint check
+
+on:
+  workflow_dispatch: {}         # run manually from the Actions tab
+  schedule:
+    - cron: "0 * * * *"         # optional: every hour; remove if not needed
+
+jobs:
+  curl_check:
+    runs-on: ubuntu-latest      # GitHub infrastructure
+
+    steps:
+      - name: Run verbose curl and capture logs
+        shell: bash
+        run: |
+          mkdir -p logs
+          # Run curl with retries and timeouts; capture both stdout and stderr (verbose) separately
+          set -o pipefail
+          CURL_URL="https://echo.engprod.prod.happening.dev/"
+
+          {
+            echo "=== START: $(date -u +"%Y-%m-%dT%H:%M:%SZ") ==="
+            echo "curl -v $CURL_URL"
+          } | tee -a logs/full.log
+
+          # Execute curl; -v goes to stderr (captured below)
+          # --retry handles transient issues; adjust as you like
+          curl -v \
+            --connect-timeout 10 \
+            --max-time 30 \
+            --retry 3 \
+            --retry-delay 2 \
+            --retry-all-errors \
+            "$CURL_URL" \
+            1>logs/curl.stdout \
+            2>logs/curl.stderr
+
+          CURL_EXIT=$?
+
+          # Combine into a single full log (stdout first, then verbose/stderr)
+          {
+            echo
+            echo "----- curl STDOUT -----"
+            cat logs/curl.stdout
+            echo
+            echo "----- curl VERBOSE/STDERR -----"
+            cat logs/curl.stderr
+            echo
+            echo "Exit code: $CURL_EXIT"
+            echo "=== END: $(date -u +"%Y-%m-%dT%H:%M:%SZ") ==="
+          } | tee -a logs/full.log
+
+          # Add a brief summary to the job
+          {
+            echo "## Echo endpoint check"
+            echo "- URL: \`$CURL_URL\`"
+            echo "- Exit code: \`$CURL_EXIT\`"
+            echo ""
+            echo "**Last 50 lines of full log:**"
+            echo ""
+            echo '```text'
+            tail -n 50 logs/full.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Optionally fail the job if curl failed (comment out if you want success regardless)
+          exit $CURL_EXIT
+
+      - name: Upload logs as artifact
+        if: always()             # upload even if the step above fails
+        uses: actions/upload-artifact@v4
+        with:
+          name: curl-echo-logs
+          path: logs/
+          if-no-files-found: error
