@@ -1,75 +1,111 @@
 name: Echo endpoint check
 
 on:
-  workflow_dispatch: {}         # run manually from the Actions tab
-  schedule:
-    - cron: "0 * * * *"         # optional: every hour; remove if not needed
+  workflow_dispatch: {}
+  # schedule:
+  #   - cron: "0 * * * *"   # optional: hourly
 
 jobs:
   curl_check:
-    runs-on: ubuntu-latest      # GitHub infrastructure
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Run verbose curl and capture logs
+      - name: Sanity check with google.com (verbose, streamed)
         shell: bash
         run: |
+          set -Eeuo pipefail
           mkdir -p logs
-          # Run curl with retries and timeouts; capture both stdout and stderr (verbose) separately
-          set -o pipefail
-          CURL_URL="https://echo.engprod.prod.happening.dev/"
+          URL="https://www.google.com"
 
-          {
-            echo "=== START: $(date -u +"%Y-%m-%dT%H:%M:%SZ") ==="
-            echo "curl -v $CURL_URL"
-          } | tee -a logs/full.log
+          echo "=== START GOOGLE CHECK: $(date -u +"%Y-%m-%dT%H:%M:%SZ") ==="
+          echo "Running: curl -v $URL"
 
-          # Execute curl; -v goes to stderr (captured below)
-          # --retry handles transient issues; adjust as you like
+          # Stream both stdout and stderr to console AND save to files
+          curl -v \
+            --connect-timeout 10 \
+            --max-time 30 \
+            --retry 2 \
+            --retry-delay 1 \
+            --retry-all-errors \
+            "$URL" \
+            1> >(tee logs/google.stdout) \
+            2> >(tee logs/google.stderr >&2)
+
+          G_EXIT=$?
+          echo "$G_EXIT" > logs/google.exitcode
+          echo "GOOGLE curl exit code: $G_EXIT"
+          echo "=== END GOOGLE CHECK: $(date -u +"%Y-%m-%dT%H:%M:%SZ") ==="
+
+          # Fail this step if google test fails (prevents hitting next endpoint)
+          test "$G_EXIT" -eq 0
+
+      - name: Echo endpoint (verbose, streamed)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p logs
+          URL="https://echo.engprod.prod.happening.dev/"
+
+          echo "=== START ECHO CHECK: $(date -u +"%Y-%m-%dT%H:%M:%SZ") ==="
+          echo "Running: curl -v $URL"
+
+          # Stream both stdout and stderr to console AND save to files
           curl -v \
             --connect-timeout 10 \
             --max-time 30 \
             --retry 3 \
             --retry-delay 2 \
             --retry-all-errors \
-            "$CURL_URL" \
-            1>logs/curl.stdout \
-            2>logs/curl.stderr
+            "$URL" \
+            1> >(tee logs/echo.stdout) \
+            2> >(tee logs/echo.stderr >&2)
 
-          CURL_EXIT=$?
+          E_EXIT=$?
+          echo "$E_EXIT" > logs/echo.exitcode
+          echo "ECHO curl exit code: $E_EXIT"
+          echo "=== END ECHO CHECK: $(date -u +"%Y-%m-%dT%H:%M:%SZ") ==="
 
-          # Combine into a single full log (stdout first, then verbose/stderr)
+          # Build a combined log for convenience
           {
+            echo "### GOOGLE CHECK ###"
+            echo "-- STDOUT --"
+            cat logs/google.stdout || true
             echo
-            echo "----- curl STDOUT -----"
-            cat logs/curl.stdout
+            echo "-- STDERR --"
+            cat logs/google.stderr || true
             echo
-            echo "----- curl VERBOSE/STDERR -----"
-            cat logs/curl.stderr
+            echo "Exit: $(cat logs/google.exitcode 2>/dev/null || echo N/A)"
             echo
-            echo "Exit code: $CURL_EXIT"
-            echo "=== END: $(date -u +"%Y-%m-%dT%H:%M:%SZ") ==="
-          } | tee -a logs/full.log
+            echo "### ECHO CHECK ###"
+            echo "-- STDOUT --"
+            cat logs/echo.stdout || true
+            echo
+            echo "-- STDERR --"
+            cat logs/echo.stderr || true
+            echo
+            echo "Exit: $(cat logs/echo.exitcode 2>/dev/null || echo N/A)"
+          } > logs/full.log
 
-          # Add a brief summary to the job
+          # Action summary (tail for brevity)
           {
             echo "## Echo endpoint check"
-            echo "- URL: \`$CURL_URL\`"
-            echo "- Exit code: \`$CURL_EXIT\`"
-            echo ""
-            echo "**Last 50 lines of full log:**"
-            echo ""
+            echo "- Google exit: \`$(cat logs/google.exitcode)\`"
+            echo "- Echo exit: \`$E_EXIT\`"
+            echo
+            echo "**Last 80 lines of full log:**"
+            echo
             echo '```text'
-            tail -n 50 logs/full.log || true
+            tail -n 80 logs/full.log || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-          # Optionally fail the job if curl failed (comment out if you want success regardless)
-          exit $CURL_EXIT
+          # Fail the job if the echo endpoint failed
+          exit "$E_EXIT"
 
       - name: Upload logs as artifact
-        if: always()             # upload even if the step above fails
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: curl-echo-logs
+          name: curl-logs
           path: logs/
-          if-no-files-found: error
+          if-no-files-found: warn
